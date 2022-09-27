@@ -80,6 +80,38 @@ void* Reader_task(void* arg_unused){
     return NULL;    
 }
 
+void Analyzer(void){
+    pthread_mutex_lock(&common.cpu_data_mutex);
+    while(common.new_data_flag == 0){
+        pthread_cond_wait(&common.new_data_cond, &common.cpu_data_mutex);
+    }         
+    cpu_data.curr_idle = cpu_data.current_cpu_stats[3] + cpu_data.current_cpu_stats[4];
+
+    unsigned long long total_diff = cpu_data.curr_total - cpu_data.prev_total;
+    unsigned long long idle_diff = cpu_data.curr_idle - cpu_data.prev_idle;
+
+    cpu_data.CPU_usage = ((float)(total_diff - idle_diff)/total_diff) * 100;
+
+    cpu_data.prev_idle = cpu_data.curr_idle;
+    cpu_data.prev_total = cpu_data.curr_total;
+    common.new_data_flag = 0;
+          
+    pthread_mutex_unlock(&common.cpu_data_mutex);
+}
+
+void* Analyzer_task(void* arg_unused){
+    if(arg_unused != NULL){
+        Close();
+    }else{
+        while(1){
+            usleep(100);
+            Watchdog_Kick();
+            Analyzer();
+        }
+    }
+    return NULL;
+}
+
 int main(){
    memset(&cpu_data, 0, sizeof(cpu_data));
    memset(&common, 0, sizeof(common));
