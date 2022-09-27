@@ -4,7 +4,7 @@
 
 typedef struct{
     float CPU_usage;
-    unsigned long long current_cpu_stats[10];
+    unsigned long long current_cpu_stats[10][BUFFER_SIZE];
     unsigned long long curr_total;
     unsigned long long curr_idle;
     unsigned long long prev_idle;
@@ -12,6 +12,8 @@ typedef struct{
 }cpu_stats_t;
 
 typedef struct{
+    int buffer_index;
+    int buffer_full;
     pthread_mutex_t cpu_data_mutex;
     pthread_cond_t new_data_cond;
     int new_data_flag;
@@ -51,11 +53,15 @@ void Reader(){
         for(int i = 0; i < 10; i++){
             cpu_data_buffer_sum += cpu_data_buffer[i];
         }
-        if((cpu_data_buffer_sum - cpu_data.curr_total) > 20){
+        if((cpu_data_buffer_sum - cpu_data.curr_total) > MINIMAL_TASK_ELAPSED){
             pthread_mutex_lock(&common.cpu_data_mutex);
             cpu_data.curr_total = cpu_data_buffer_sum;
+            if(common.buffer_index == (BUFFER_SIZE-1)){
+                common.buffer_full = 1;
+            }
+            common.buffer_index = (common.buffer_index+1)%BUFFER_SIZE;
             for(int i = 0; i < 10; i++){
-                cpu_data.current_cpu_stats[i] = cpu_data_buffer[i];
+                cpu_data.current_cpu_stats[i][common.buffer_index] = cpu_data_buffer[i];
             }
             common.new_data_flag = 1;
             pthread_cond_signal(&common.new_data_cond);
@@ -68,14 +74,10 @@ void Reader(){
 }
 
 void* Reader_task(void* arg_unused){
-    if(arg_unused != NULL){
-        Close();
-    }else{
-        while(1){
-            usleep(100);
-            Watchdog_Kick();
-            Reader();
-        }
+    while(1){
+        usleep(100);
+        Watchdog_Kick();
+        Reader();
     }
     return NULL;    
 }
@@ -84,30 +86,35 @@ void Analyzer(void){
     pthread_mutex_lock(&common.cpu_data_mutex);
     while(common.new_data_flag == 0){
         pthread_cond_wait(&common.new_data_cond, &common.cpu_data_mutex);
-    }         
-    cpu_data.curr_idle = cpu_data.current_cpu_stats[3] + cpu_data.current_cpu_stats[4];
+    }       
+    cpu_data.curr_idle = cpu_data.current_cpu_stats[3][common.buffer_index] + cpu_data.current_cpu_stats[4][common.buffer_index];
 
     unsigned long long total_diff = cpu_data.curr_total - cpu_data.prev_total;
     unsigned long long idle_diff = cpu_data.curr_idle - cpu_data.prev_idle;
 
     cpu_data.CPU_usage = ((float)(total_diff - idle_diff)/total_diff) * 100;
 
-    cpu_data.prev_idle = cpu_data.curr_idle;
-    cpu_data.prev_total = cpu_data.curr_total;
+    if(common.buffer_full == 1){
+        int index = (common.buffer_index+1)%BUFFER_SIZE;
+        cpu_data.prev_idle = cpu_data.current_cpu_stats[3][index] + cpu_data.current_cpu_stats[4][index];
+        cpu_data.prev_total = 0;
+        for(int i = 0; i < 10; i++){
+            cpu_data.prev_total += cpu_data.current_cpu_stats[i][index];
+        }
+    }else{
+        cpu_data.prev_idle = cpu_data.curr_idle;
+        cpu_data.prev_total = cpu_data.curr_total;
+    }
     common.new_data_flag = 0;
           
     pthread_mutex_unlock(&common.cpu_data_mutex);
 }
 
 void* Analyzer_task(void* arg_unused){
-    if(arg_unused != NULL){
-        Close();
-    }else{
-        while(1){
-            usleep(100);
-            Watchdog_Kick();
-            Analyzer();
-        }
+    while(1){
+        usleep(100);
+        Watchdog_Kick();
+        Analyzer();
     }
     return NULL;
 }
