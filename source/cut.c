@@ -12,16 +12,38 @@ typedef struct{
 }cpu_stats_t;
 
 typedef struct{
+    clock_t  last_watchdog_kick_time;
     int buffer_index;
     int buffer_full;
     pthread_mutex_t cpu_data_mutex;
+    pthread_mutex_t watchdog_mutex;
+    pthread_mutex_t exit_flag_mutex;
     pthread_cond_t new_data_cond;
     int new_data_flag;
+    int exit_flag;
 }runtime_data_t;
 
 cpu_stats_t cpu_data;
 runtime_data_t common;
 pthread_t thr[4];
+
+void Close(){
+    pthread_join(thr[0], NULL);
+    pthread_join(thr[1], NULL);
+    pthread_join(thr[2], NULL);
+    pthread_join(thr[3], NULL);
+    pthread_mutex_destroy(&common.cpu_data_mutex);
+    pthread_mutex_destroy(&common.watchdog_mutex);
+    pthread_mutex_destroy(&common.exit_flag_mutex);
+    pthread_cond_destroy(&common.new_data_cond);
+    exit(0);
+}
+
+void Watchdog_Kick(){
+    pthread_mutex_lock(&common.watchdog_mutex);
+    common.last_watchdog_kick_time = clock();
+    pthread_mutex_unlock(&common.watchdog_mutex);
+}
 
 void Printer(void){
     printf("\rTotal CPU usage: %6.2f%%", cpu_data.CPU_usage);
@@ -29,10 +51,20 @@ void Printer(void){
 }
 
 void* Printer_task(void* arg_unused){
-    while(1){
-        Watchdog_Kick();
-        sleep(1);
-        Printer();
+    if(arg_unused != NULL){
+        Close();
+    }else{
+        while(1){
+            Watchdog_Kick();
+            sleep(1);
+            Printer();
+            pthread_mutex_lock(&common.exit_flag_mutex);
+            if(common.exit_flag){
+                pthread_mutex_unlock(&common.exit_flag_mutex);
+                break;
+            }
+            pthread_mutex_unlock(&common.exit_flag_mutex);
+        }
     }
     return NULL;
 }
@@ -74,19 +106,25 @@ void Reader(){
 }
 
 void* Reader_task(void* arg_unused){
-    while(1){
-        usleep(100);
-        Watchdog_Kick();
-        Reader();
+    if(arg_unused != NULL){
+        Close();
+    }else{
+        while(!common.exit_flag){
+            usleep(100);
+            Watchdog_Kick();
+            Reader();
+        }
     }
     return NULL;    
 }
 
 void Analyzer(void){
     pthread_mutex_lock(&common.cpu_data_mutex);
-    while(common.new_data_flag == 0){
+    pthread_mutex_lock(&common.exit_flag_mutex);
+    while(common.new_data_flag == 0 && common.exit_flag == 0){
         pthread_cond_wait(&common.new_data_cond, &common.cpu_data_mutex);
-    }       
+    }
+    pthread_mutex_unlock(&common.exit_flag_mutex);           
     cpu_data.curr_idle = cpu_data.current_cpu_stats[3][common.buffer_index] + cpu_data.current_cpu_stats[4][common.buffer_index];
 
     unsigned long long total_diff = cpu_data.curr_total - cpu_data.prev_total;
@@ -111,22 +149,73 @@ void Analyzer(void){
 }
 
 void* Analyzer_task(void* arg_unused){
-    while(1){
-        usleep(100);
-        Watchdog_Kick();
-        Analyzer();
+    if(arg_unused != NULL){
+        Close();
+    }else{
+        while(1){
+            usleep(100);
+            Watchdog_Kick();
+            Analyzer();
+            pthread_mutex_lock(&common.exit_flag_mutex);
+            if(common.exit_flag){
+                pthread_mutex_unlock(&common.exit_flag_mutex);
+                break;
+            }
+            pthread_mutex_unlock(&common.exit_flag_mutex);
+        }
     }
     return NULL;
+}
+
+void CtrlCHandler(){
+    pthread_mutex_lock(&common.exit_flag_mutex);
+    common.exit_flag = 1;
+    pthread_mutex_unlock(&common.exit_flag_mutex);
+    sleep(1);
+    printf("\nExiting...\n");
+    Close();
+}
+
+void Watchdog(void){
+    clock_t current_watchdog_kick_time = clock();
+    double diff = ((double)(current_watchdog_kick_time - common.last_watchdog_kick_time))/CLOCKS_PER_SEC;
+    if(diff > 2.0){
+        printf("\nWatchdog error!");
+        Close();
+    }
+}
+
+void* Watchdog_task(void* arg_unused){
+    if(arg_unused != NULL){
+        Close();
+    }else{
+        while(1){
+            usleep(100);
+            Watchdog();
+            pthread_mutex_lock(&common.exit_flag_mutex);
+            if(common.exit_flag){
+                pthread_mutex_unlock(&common.exit_flag_mutex);
+                break;
+            }
+            pthread_mutex_unlock(&common.exit_flag_mutex);
+        }
+    }
+    return NULL;    
 }
 
 int main(){
    memset(&cpu_data, 0, sizeof(cpu_data));
    memset(&common, 0, sizeof(common));
    pthread_mutex_init(&common.cpu_data_mutex, NULL);
+   pthread_mutex_init(&common.watchdog_mutex, NULL);
+   pthread_mutex_init(&common.exit_flag_mutex,NULL);
    pthread_cond_init(&common.new_data_cond, NULL);
 
    pthread_create(&thr[1], NULL, Reader_task, NULL);
    pthread_create(&thr[2], NULL, Printer_task, NULL);
+   pthread_create(&thr[0], NULL, Analyzer_task, NULL);
+   pthread_create(&thr[3], NULL, Watchdog_task, NULL);
+   signal(SIGINT, CtrlCHandler);
 
     while(1){
         sleep(1);
